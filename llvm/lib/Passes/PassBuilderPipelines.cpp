@@ -128,6 +128,13 @@
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
 #include "llvm/Transforms/Vectorize/VectorCombine.h"
 
+#include "llvm/Transforms/Utils/LowerSwitch.h"
+#include "llvm/Transforms/Obfuscation/Flattening.h"
+#include "llvm/Transforms/Obfuscation/Substitution.h"
+#include "llvm/Transforms/Obfuscation/BogusControlFlow.h"
+#include "llvm/Transforms/Obfuscation/Split.h"
+#include "llvm/Transforms/Obfuscation/StringObfuscation.h"
+
 using namespace llvm;
 
 static cl::opt<InliningAdvisorMode> UseInlineAdvisor(
@@ -182,6 +189,12 @@ static cl::opt<bool> EnableMergeFunctions(
     "enable-merge-functions", cl::init(false), cl::Hidden,
     cl::desc("Enable function merging as part of the optimization pipeline"));
 
+static cl::opt<std::string> AesSeed("aesSeed", cl::init(""),
+                                    cl::desc("seed for the AES-CTR PRNG"));
+
+static cl::opt<std::string> Seed("seed", cl::init(""),
+                           cl::desc("seed for the random"));
+
 PipelineTuningOptions::PipelineTuningOptions() {
   LoopInterleaving = true;
   LoopVectorization = true;
@@ -193,6 +206,15 @@ PipelineTuningOptions::PipelineTuningOptions() {
   CallGraphProfile = true;
   MergeFunctions = EnableMergeFunctions;
   EagerlyInvalidateAnalyses = EnableEagerlyInvalidateAnalyses;
+
+  if(!AesSeed.empty()) {
+    llvm::cryptoutils->prng_seed(AesSeed.c_str());
+  }
+
+  //random generator
+  if(!Seed.empty()) {
+    llvm::cryptoutils->prng_seed(Seed.c_str());
+  }
 }
 
 namespace llvm {
@@ -1193,6 +1215,15 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
     C(MPM, Level);
 
   FunctionPassManager OptimizePM;
+
+  // Obfuscation
+  OptimizePM.addPass(SplitBasicBlockPass());
+  OptimizePM.addPass(BogusControlFlowPass());
+  #if LLVM_VERSION_MAJOR >= 9
+    OptimizePM.addPass(LowerSwitchPass());
+  #endif
+  OptimizePM.addPass(FlatteningPass());
+
   OptimizePM.addPass(Float2IntPass());
   OptimizePM.addPass(LowerConstantIntrinsicsPass());
 
@@ -1260,6 +1291,10 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   // Add the core optimizing pipeline.
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(OptimizePM),
                                                 PTO.EagerlyInvalidateAnalyses));
+
+  // Obfuscation  
+  OptimizePM.addPass(SubstitutionPass());
+  MPM.addPass(StringObfuscationPass());
 
   for (auto &C : OptimizerLastEPCallbacks)
     C(MPM, Level);
